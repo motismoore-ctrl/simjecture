@@ -115,6 +115,23 @@ The SOLIDWORKS adapter requires a registered desktop SOLIDWORKS COM server and
 self-contained `.sldprt` parts, dimension changes, rebuilding and STEP/IGES/STL
 exports. It does not stage assembly references or run SOLIDWORKS Simulation.
 
+To inspect an already-open session without changing or saving any document:
+
+```bash
+simjecture windows inspect --application solidworks \
+  --installation '/mnt/c/Program Files/SOLIDWORKS Corp/SOLIDWORKS' \
+  --python '/mnt/c/Python312/python.exe'
+```
+
+The response includes the session PID and revision, active document, open document
+paths/types, unsaved-change flags and read-only flags. `--project PATH` optionally
+filters the open-document list; inspection never opens the requested path. A
+session with no open document returns `active_document: null`. Run Windows Python
+under the same account and elevation as the desktop application. Install `pywin32`
+in that Windows interpreter, rather than in the WSL Python environment.
+
+To rebuild and export a copied part in a separate, owned process:
+
 ```bash
 simjecture windows submit --application solidworks \
   --installation '/mnt/c/Program Files/SOLIDWORKS Corp/SOLIDWORKS' \
@@ -129,20 +146,37 @@ metres for lengths and radians for angles, irrespective of the model display
 units. The adapter checks the rebuilt values and clears selections before export
 to avoid exporting only selected faces or bodies.
 
-COM activation can create a process outside the worker's descendant tree. The
-adapter checks the returned PID's creation time, assigns the new process to the
-supervisor's named Windows Job Object and checks its executable against the chosen
-installation before opening a model. An existing operator session is refused and
-left open. The adapter's COM objects are released on the same initialized thread.
-If COM activation fails or hangs before a process can be identified and adopted,
-the receipt is `interrupted`, with the stop explicitly unconfirmed and activation
-details retained in `external-activation.json`. Inspect and reconcile that
-activation before starting another job on the installation.
+Batch submission starts the selected `SLDWORKS.exe`, verifies its creation time
+and executable, and claims it in the supervisor's Windows Job Object before
+opening a model. The adapter waits for that PID's `SolidWorks_PID_<pid>` entry in
+the Windows Running Object Table. Generic COM activation can reuse an existing
+desktop session even with `DispatchEx`; the batch adapter never uses that route.
+Startup is bounded, and cancellation or failure terminates only the owned job.
+The adapter releases COM objects on their initialized thread. Read-only inspection
+connects to an existing session without taking process ownership or closing it.
 
-This adapter is experimental and has no claimed native SOLIDWORKS model
-commissioning. Contract tests use mocked COM objects; native Windows tests cover
-the real process-adoption mechanism without SOLIDWORKS. Test an actual part and
-its exported geometry before depending on the adapter for a design workflow.
+Exports use `.step`, `.igs` and `.stl`; SOLIDWORKS may capitalize the STL suffix.
+The export list records the actual filenames, matching the hashed artifact
+inventory. Export failures include the native error and warning codes. See the
+vendor's [SaveAs reference](https://help.solidworks.com/2026/English/api/sldworksapi/SOLIDWORKS.Interop.sldworks~SOLIDWORKS.Interop.sldworks.IModelDocExtension~SaveAs.html)
+for conversion formats, active-document requirements and selection handling.
+
+### Native commissioning
+
+On 2026-10-19, the shared WSL client, detached Windows supervisor and frozen worker
+bundle were exercised with SOLIDWORKS 2025 revision 33.5.0, Windows Python 3.14.2
+and pywin32 312. Read-only inspection connected to an existing desktop session.
+A copied vendor `samples/tutorial/api/cube.sldprt` rebuilt and exported nonempty
+STEP, IGES and STL files in a distinct owned process, while the original desktop
+process remained open. Input and artifact hashes were checked through the common
+job protocol. Native models and desktop metadata remain in local commissioning
+records.
+
+This establishes native orchestration and part export. Geometric equivalence and
+numerical accuracy need separate validation. Contract tests cover SI dimension
+changes and failure cleanup; the native export commissioning used `dimensions_si: {}`. Validate the
+specific model, dimensions and exported geometry before relying on them. Assembly
+staging, SOLIDWORKS Simulation and other releases remain unqualified.
 
 ## Adapter and protocol contract
 

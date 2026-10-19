@@ -4,6 +4,12 @@ This project follows semantic versioning. Dates use ISO 8601.
 
 ## Unreleased
 
+- Connect to an open SOLIDWORKS session with read-only `windows inspect` and
+  commission part rebuild/export on SOLIDWORKS 2025. Launch batch jobs in their
+  own process and bind its PID-specific automation interface. Correct pywin32
+  registration lookup, method dispatch, export argument types and IGES suffixes;
+  retain the actual output filename casing in export receipts.
+
 - Let a worker acknowledge the replan supplied at the start of its turn. A new
   directive can still interrupt an older turn; an already-delivered directive no
   longer causes an endless two-second interruption and relaunch cycle.

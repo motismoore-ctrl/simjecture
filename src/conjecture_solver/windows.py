@@ -78,6 +78,18 @@ class WindowsBridge:
     def check(self):
         return self.call("check")
 
+    def inspect(self, project=None, results=(), *, allow_open=False):
+        if self.application == "cst" and project is None:
+            raise ValueError("CST inspection requires --project")
+        args = []
+        if project is not None:
+            args.extend(("--project", self._windows_path(linux_path(project))))
+        for result in results:
+            args.extend(("--result", result))
+        if allow_open:
+            args.append("--allow-open")
+        return self.call("inspect", *args)
+
     @staticmethod
     def _sources_manifest(sources):
         files = {}
@@ -269,11 +281,15 @@ def configure_parser(parser):
     describe = actions.add_parser("describe")
     describe.add_argument("--application", choices=tuple(runtime.ADAPTERS))
     describe.set_defaults(handler=main)
-    for name in ("check", "submit"):
+    for name in ("check", "inspect", "submit"):
         action = actions.add_parser(name)
         action.add_argument("--application", choices=tuple(runtime.ADAPTERS), required=True)
         action.add_argument("--installation", required=True)
         action.add_argument("--python", required=True)
+        if name == "inspect":
+            action.add_argument("--project")
+            action.add_argument("--result", action="append", default=[])
+            action.add_argument("--allow-open", action="store_true")
         if name == "submit":
             action.add_argument("--project", required=True)
             action.add_argument("--job-root", required=True)
@@ -300,6 +316,8 @@ def main(args):
         bridge = WindowsBridge(args.application, args.installation, args.python)
         if action == "check":
             result = bridge.check()
+        elif action == "inspect":
+            result = bridge.inspect(args.project, args.result, allow_open=args.allow_open)
         else:
             arguments = json.loads(args.arguments)
             result = bridge.submit_application(

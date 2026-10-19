@@ -219,7 +219,7 @@ def test_offline_discovery_and_cli_do_not_require_vendor_installations(capsys):
     assert set(products) == {"cst", "solidworks"}
     assert "project.python" in products["cst"]["operations"]
     assert "part.rebuild_export" in products["solidworks"]["operations"]
-    assert "no native SOLIDWORKS" in products["solidworks"]["qualification"]
+    assert "experimental" in products["solidworks"]["qualification"]
     args = build_parser().parse_args(["windows", "describe"])
     assert args.handler(args) == 0
     assert json.loads(capsys.readouterr().out)["protocol"] == runtime.PROTOCOL
@@ -386,6 +386,7 @@ def solidworks_case(tmp_path, monkeypatch):
 
     def export(path, *args):
         events.append("export")
+        assert args[2].kind == 9 and args[2].value is None
         if failures["export"]:
             return False
         Path(path).write_bytes(b"CAD export")
@@ -416,14 +417,28 @@ def solidworks_case(tmp_path, monkeypatch):
     pythoncom = SimpleNamespace(
         VT_BYREF=0x4000,
         VT_I4=3,
+        VT_DISPATCH=9,
         CoInitialize=lambda: events.append("initialize"),
         CoUninitialize=lambda: events.append("uninitialize"),
+        CreateBindCtx=lambda _: None,
+        IID_IDispatch="IDispatch",
     )
+    moniker = SimpleNamespace(GetDisplayName=lambda *_: "SolidWorks_PID_42")
+    table = [moniker]
+
+    class RunningObjectTable(list):
+        def GetObject(self, entry):
+            assert entry is moniker
+            return SimpleNamespace(QueryInterface=lambda _: application)
+
+    pythoncom.GetRunningObjectTable = lambda: RunningObjectTable(table)
     client = SimpleNamespace(
-        DispatchEx=lambda _: application,
-        VARIANT=lambda kind, value: SimpleNamespace(value=value),
+        Dispatch=lambda value: value,
+        VARIANT=lambda kind, value: SimpleNamespace(kind=kind, value=value),
     )
     monkeypatch.setattr(solidworks, "load_com", lambda: (pythoncom, client))
+    process = SimpleNamespace(pid=42, poll=lambda: None)
+    monkeypatch.setattr(solidworks.subprocess, "Popen", lambda _: process)
 
     def claim(pid, start, executable):
         events.append("claim")
@@ -448,7 +463,209 @@ def solidworks_case(tmp_path, monkeypatch):
         events=events,
         failures=failures,
         dimensions=dimensions,
+        application=application,
+        model=model,
+        client=client,
+        pythoncom=pythoncom,
+        process=process,
+        table=table,
     )
+
+
+class LateBoundDispatch:
+    """Model pywin32 invoking no-argument COM methods during attribute lookup."""
+
+    def __init__(self, target, implicit):
+        self.target = target
+        self.implicit = set(implicit)
+        self.methods = set()
+
+    def _FlagAsMethod(self, *names):
+        self.methods.update(names)
+
+    def __getattr__(self, name):
+        member = getattr(self.target, name)
+        if name in self.implicit and name not in self.methods:
+            return member()
+        return member
+
+
+def test_solidworks_check_resolves_registration_without_activating_com(tmp_path, monkeypatch):
+    (tmp_path / "SLDWORKS.exe").write_bytes(b"fixture")
+    monkeypatch.setattr(solidworks, "load_com", lambda: (None, None))
+    monkeypatch.setitem(
+        sys.modules, "pywintypes", SimpleNamespace(IID=lambda name: "registered-" + name)
+    )
+    result = solidworks.check(str(tmp_path))
+    assert result["com_class"] == "registered-SldWorks.Application"
+    assert result["application_started"] is False and result["model_tested"] is False
+
+
+def test_solidworks_late_bound_com_methods_are_not_invoked_as_properties(solidworks_case):
+    case = solidworks_case
+    model = LateBoundDispatch(case.model, ("GetTitle",))
+    case.application.OpenDoc6 = lambda *args: model
+    case.application.ActivateDoc3 = lambda *args: model
+    application = LateBoundDispatch(
+        case.application, ("GetProcessID", "RevisionNumber", "ExitApp")
+    )
+    case.client.Dispatch = lambda _: application
+    result = solidworks.execute(case.job, case.request, case.context)
+    assert result["solidworks_runtime"] == {"pid": 42, "revision": "fake revision"}
+    assert result["exports"] == ["work/project.step"]
+    assert case.events.count("exit") == 1
+    assert case.events.count("close_document") == 1
+
+
+def test_solidworks_exports_all_formats_with_native_iges_suffix(solidworks_case):
+    case = solidworks_case
+    case.request["arguments"]["exports"] = ["step", "iges", "stl"]
+    result = solidworks.execute(case.job, case.request, case.context)
+    assert result["exports"] == ["work/project.step", "work/project.igs", "work/project.stl"]
+    assert all((case.job / name).is_file() for name in result["exports"])
+
+
+def test_solidworks_reports_actual_export_filename_casing(solidworks_case):
+    case = solidworks_case
+    case.request["arguments"]["exports"] = ["stl"]
+
+    def export(path, *_):
+        Path(path).with_suffix(".STL").write_bytes(b"native STL export")
+        return True
+
+    case.model.Extension.SaveAs = export
+    assert solidworks.execute(case.job, case.request, case.context)["exports"] == [
+        "work/project.STL"
+    ]
+
+
+def test_solidworks_startup_ignores_unrelated_running_sessions(solidworks_case):
+    case = solidworks_case
+    case.table.insert(0, SimpleNamespace(GetDisplayName=lambda *_: "SolidWorks_PID_999"))
+    result = solidworks.execute(case.job, case.request, case.context)
+    assert result["solidworks_runtime"]["pid"] == 42
+    assert case.events.index("claim") < case.events.index("open")
+
+
+@pytest.mark.parametrize("failure", ["exited", "timeout", "different_pid"])
+def test_solidworks_startup_failure_never_opens_or_exits_an_unbound_session(
+    solidworks_case, monkeypatch, failure,
+):
+    case = solidworks_case
+    if failure == "exited":
+        case.process.poll = lambda: 1
+    elif failure == "timeout":
+        case.table.clear()
+        clock = iter((0, 0, 121))
+        monkeypatch.setattr(solidworks.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(solidworks.time, "sleep", lambda _: None)
+    else:
+        case.application.GetProcessID = lambda: 999
+    with pytest.raises((RuntimeError, TimeoutError)):
+        solidworks.execute(case.job, case.request, case.context)
+    assert "open" not in case.events and "exit" not in case.events
+    assert case.events[-1] == "uninitialize"
+
+
+@pytest.fixture
+def solidworks_session(solidworks_case, monkeypatch):
+    case = solidworks_case
+    case.model.GetPathName = lambda: str(case.job / "original.sldprt")
+    case.model.GetType = lambda: 1
+    case.model.GetSaveFlag = lambda: True
+    case.model.IsOpenedReadOnly = lambda: False
+    model = LateBoundDispatch(
+        case.model, ("GetTitle", "GetPathName", "GetType", "GetSaveFlag", "IsOpenedReadOnly")
+    )
+    case.application.GetDocuments = lambda: (model,)
+    case.application.ActiveDoc = model
+    application = LateBoundDispatch(
+        case.application, ("GetProcessID", "RevisionNumber", "GetDocuments", "ExitApp")
+    )
+    case.client.GetActiveObject = lambda _: application
+    case.pythoncom.com_error = type("COMError", (Exception,), {})
+    monkeypatch.setattr(solidworks, "check", lambda _: {})
+    return case
+
+
+def test_solidworks_inspection_preserves_existing_unsaved_document(solidworks_session):
+    case = solidworks_session
+    result = solidworks.inspect_project("C:/SOLIDWORKS")
+    assert result["pid"] == 42
+    assert result["active_document"] == result["documents"][0]
+    assert result["active_document"]["modified"] is True
+    assert result["active_document"]["type"] == "part"
+    assert result["model_modified"] is False and result["session_owned"] is False
+    assert result["application_started"] is False
+    assert case.events == ["initialize", "uninitialize"]
+
+
+def test_solidworks_inspection_filters_open_document_without_opening_another(solidworks_session):
+    case = solidworks_session
+    path = case.model.GetPathName()
+    assert len(solidworks.inspect_project("C:/SOLIDWORKS", path)["documents"]) == 1
+    with pytest.raises(ValueError, match="not open"):
+        solidworks.inspect_project("C:/SOLIDWORKS", case.job / "other.sldprt")
+    assert "open" not in case.events and "exit" not in case.events
+    assert case.events[-1] == "uninitialize"
+
+
+def test_solidworks_inspection_accepts_an_empty_running_session(solidworks_session):
+    case = solidworks_session
+    case.application.GetDocuments = lambda: None
+    case.application.ActiveDoc = None
+    result = solidworks.inspect_project("C:/SOLIDWORKS")
+    assert result["documents"] == [] and result["active_document"] is None
+
+
+def test_solidworks_inspection_does_not_start_a_missing_session(solidworks_session):
+    case = solidworks_session
+
+    def unavailable(_):
+        raise case.pythoncom.com_error("No running object")
+
+    case.client.GetActiveObject = unavailable
+    with pytest.raises(RuntimeError, match="same Windows user and elevation"):
+        solidworks.inspect_project("C:/SOLIDWORKS")
+    assert case.events == ["initialize", "uninitialize"]
+
+
+@pytest.mark.parametrize("kwargs", [{"paths": ["result"]}, {"allow_open": True}])
+def test_solidworks_inspection_rejects_opening_and_solver_results(kwargs):
+    with pytest.raises(ValueError, match="omit --result and --allow-open"):
+        solidworks.inspect_project("C:/SOLIDWORKS", **kwargs)
+
+
+def test_windows_inspection_cli_forwards_optional_native_arguments(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(windows.WindowsBridge, "__init__", lambda *args: None)
+    monkeypatch.setattr(
+        windows.WindowsBridge, "inspect",
+        lambda self, project, results, **kwargs:
+        calls.append((project, results, kwargs)) or {"documents": []},
+    )
+    args = build_parser().parse_args([
+        "windows", "inspect", "--application", "solidworks",
+        "--installation", "C:/SOLIDWORKS", "--python", "C:/Python/python.exe",
+    ])
+    assert windows.main(args) == 0
+    assert calls == [(None, [], {"allow_open": False})]
+    assert json.loads(capsys.readouterr().out) == {"documents": []}
+
+
+def test_windows_inspection_passes_cst_paths_and_flags_to_native_runner(monkeypatch):
+    bridge = object.__new__(windows.WindowsBridge)
+    bridge.application = "cst"
+    bridge._windows_path = lambda _: "C:\\work\\project.cst"
+    calls = []
+    bridge.call = lambda *args: calls.append(args) or {}
+    with pytest.raises(ValueError, match="requires --project"):
+        bridge.inspect()
+    bridge.inspect("project.cst", ["1D Results\\test"], allow_open=True)
+    assert calls == [(
+        "inspect", "--project", "C:\\work\\project.cst", "--result",
+        "1D Results\\test", "--allow-open",
+    )]
 
 
 def test_solidworks_adapter_claims_session_then_edits_rebuilds_and_exports(solidworks_case):
