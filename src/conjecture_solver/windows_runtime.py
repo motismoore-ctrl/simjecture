@@ -334,6 +334,7 @@ def main(default_application="cst"):
     parser.add_argument("--project")
     parser.add_argument("--result", action="append", default=[])
     parser.add_argument("--allow-open", action="store_true")
+    parser.add_argument("--pid", type=int)
     args = parser.parse_args()
     if args.job is not None:
         args.job = args.job.resolve()
@@ -344,6 +345,8 @@ def main(default_application="cst"):
         result = adapter(application).check(args.installation)
         result.update(protocol=PROTOCOL, application=application)
     elif args.action == "inspect":
+        if args.pid is not None and application != "solidworks":
+            raise ValueError("--pid is supported only for SOLIDWORKS inspection")
         module = adapter(application)
         if not hasattr(module, "inspect_project"):
             raise ValueError("This adapter exposes inspection through submitted jobs")
@@ -352,6 +355,7 @@ def main(default_application="cst"):
             args.project,
             args.result,
             args.allow_open,
+            **({"pid": args.pid} if args.pid is not None else {}),
         )
         result.update(protocol=PROTOCOL, application=application)
     elif args.action == "submit":

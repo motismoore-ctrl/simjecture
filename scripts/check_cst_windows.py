@@ -281,6 +281,12 @@ class NativeSupervisorTests(unittest.TestCase):
             RUNNER.supervise(self.job)
         self.assertEqual(RUNNER.read(self.job / "state.json")["status"], "cancelled")
 
+    def test_solidworks_inspection_reads_process_image_without_ownership(self):
+        if not hasattr(RUNNER, "adapter"):
+            self.skipTest("Legacy CST compatibility entrypoint")
+        solidworks = RUNNER.adapter("solidworks")
+        self.assertEqual(solidworks.process_executable(os.getpid()), Path(sys.executable).resolve())
+
     def test_new_external_process_can_be_adopted_by_named_job(self):
         if not hasattr(RUNNER, "claim_process"):
             self.skipTest("Legacy CST compatibility entrypoint")

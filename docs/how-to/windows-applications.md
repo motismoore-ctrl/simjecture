@@ -130,6 +130,12 @@ session with no open document returns `active_document: null`. Run Windows Pytho
 under the same account and elevation as the desktop application. Install `pywin32`
 in that Windows interpreter, rather than in the WSL Python environment.
 
+Inspection binds only a session whose process executable matches the selected
+installation. When several matching sessions are open, it reports their PIDs and
+requires `--pid NUMBER` to choose one. The chosen PID is still checked against
+`--installation`; a missing, inaccessible or mismatched process is not replaced
+with another session. The `--pid` option applies only to SOLIDWORKS inspection.
+
 To rebuild and export a copied part in a separate, owned process:
 
 ```bash
@@ -151,7 +157,9 @@ and executable, and claims it in the supervisor's Windows Job Object before
 opening a model. The adapter waits for that PID's `SolidWorks_PID_<pid>` entry in
 the Windows Running Object Table. Generic COM activation can reuse an existing
 desktop session even with `DispatchEx`; the batch adapter never uses that route.
-Startup is bounded, and cancellation or failure terminates only the owned job.
+Unreadable entries belonging to other COM objects are skipped. Temporary failures
+binding the owned process are retried within the startup deadline. Cancellation
+or failure terminates only the owned job.
 The adapter releases COM objects on their initialized thread. Read-only inspection
 connects to an existing session without taking process ownership or closing it.
 

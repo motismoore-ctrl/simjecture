@@ -422,14 +422,15 @@ def solidworks_case(tmp_path, monkeypatch):
         CoUninitialize=lambda: events.append("uninitialize"),
         CreateBindCtx=lambda _: None,
         IID_IDispatch="IDispatch",
+        com_error=type("COMError", (Exception,), {}),
     )
     moniker = SimpleNamespace(GetDisplayName=lambda *_: "SolidWorks_PID_42")
     table = [moniker]
+    bindings = {id(moniker): application}
 
     class RunningObjectTable(list):
         def GetObject(self, entry):
-            assert entry is moniker
-            return SimpleNamespace(QueryInterface=lambda _: application)
+            return SimpleNamespace(QueryInterface=lambda _: bindings[id(entry)])
 
     pythoncom.GetRunningObjectTable = lambda: RunningObjectTable(table)
     client = SimpleNamespace(
@@ -469,6 +470,7 @@ def solidworks_case(tmp_path, monkeypatch):
         pythoncom=pythoncom,
         process=process,
         table=table,
+        bindings=bindings,
     )
 
 
@@ -547,6 +549,61 @@ def test_solidworks_startup_ignores_unrelated_running_sessions(solidworks_case):
     assert case.events.index("claim") < case.events.index("open")
 
 
+def test_solidworks_startup_skips_unreadable_rot_entries(solidworks_case):
+    case = solidworks_case
+
+    def unreadable(*_):
+        raise case.pythoncom.com_error("E_NOTIMPL: no display name")
+
+    case.table.insert(0, SimpleNamespace(GetDisplayName=unreadable))
+    result = solidworks.execute(case.job, case.request, case.context)
+    assert result["solidworks_runtime"]["pid"] == 42
+    assert case.events.index("claim") < case.events.index("open")
+    assert case.events.count("exit") == 1
+
+
+@pytest.mark.parametrize("stage", ["display_name", "get_object", "dispatch", "process_id"])
+def test_solidworks_startup_retries_transient_com_failures(solidworks_case, monkeypatch, stage):
+    case = solidworks_case
+    calls = []
+    table = case.pythoncom.GetRunningObjectTable()
+    case.pythoncom.GetRunningObjectTable = lambda: table
+    target, name = {
+        "display_name": (case.table[0], "GetDisplayName"),
+        "get_object": (table, "GetObject"),
+        "dispatch": (case.client, "Dispatch"),
+        "process_id": (case.application, "GetProcessID"),
+    }[stage]
+    original = getattr(target, name)
+
+    def busy_once(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise case.pythoncom.com_error("RPC_E_CALL_REJECTED")
+        return original(*args)
+
+    monkeypatch.setattr(target, name, busy_once)
+    monkeypatch.setattr(solidworks.time, "sleep", lambda _: None)
+    result = solidworks.execute(case.job, case.request, case.context)
+    assert result["solidworks_runtime"]["pid"] == 42
+    assert len(calls) >= 2 and case.events.count("open") == 1
+
+
+def test_solidworks_startup_bounds_persistent_com_failures(solidworks_case, monkeypatch):
+    case = solidworks_case
+
+    def unavailable(_):
+        raise case.pythoncom.com_error("Disconnected object")
+
+    case.client.Dispatch = unavailable
+    clock = iter((0, 0, 121))
+    monkeypatch.setattr(solidworks.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(solidworks.time, "sleep", lambda _: None)
+    with pytest.raises(TimeoutError, match="startup timed out"):
+        solidworks.execute(case.job, case.request, case.context)
+    assert case.events == ["initialize", "claim", "uninitialize"]
+
+
 @pytest.mark.parametrize("failure", ["exited", "timeout", "different_pid"])
 def test_solidworks_startup_failure_never_opens_or_exits_an_unbound_session(
     solidworks_case, monkeypatch, failure,
@@ -582,8 +639,10 @@ def solidworks_session(solidworks_case, monkeypatch):
     application = LateBoundDispatch(
         case.application, ("GetProcessID", "RevisionNumber", "GetDocuments", "ExitApp")
     )
-    case.client.GetActiveObject = lambda _: application
-    case.pythoncom.com_error = type("COMError", (Exception,), {})
+    case.bindings[id(case.table[0])] = application
+    monkeypatch.setattr(
+        solidworks, "process_executable", lambda _: Path("C:/SOLIDWORKS/SLDWORKS.exe").resolve()
+    )
     monkeypatch.setattr(solidworks, "check", lambda _: {})
     return case
 
@@ -620,14 +679,115 @@ def test_solidworks_inspection_accepts_an_empty_running_session(solidworks_sessi
 
 def test_solidworks_inspection_does_not_start_a_missing_session(solidworks_session):
     case = solidworks_session
-
-    def unavailable(_):
-        raise case.pythoncom.com_error("No running object")
-
-    case.client.GetActiveObject = unavailable
+    case.table.clear()
     with pytest.raises(RuntimeError, match="same Windows user and elevation"):
         solidworks.inspect_project("C:/SOLIDWORKS")
     assert case.events == ["initialize", "uninitialize"]
+
+
+@pytest.fixture
+def solidworks_multiple_sessions(solidworks_session):
+    case = solidworks_session
+    other = SimpleNamespace(
+        GetProcessID=lambda: 999,
+        RevisionNumber=lambda: "second session",
+        GetDocuments=lambda: (),
+        ActiveDoc=None,
+    )
+    entry = SimpleNamespace(GetDisplayName=lambda *_: "SolidWorks_PID_999")
+    case.table.insert(0, entry)
+    case.bindings[id(entry)] = other
+    return case
+
+
+def test_solidworks_inspection_selects_only_the_requested_installation(
+    solidworks_multiple_sessions, monkeypatch,
+):
+    case = solidworks_multiple_sessions
+    selected = Path("C:/SOLIDWORKS/SLDWORKS.exe").resolve()
+    other = Path("C:/Another-SOLIDWORKS/SLDWORKS.exe").resolve()
+    monkeypatch.setattr(
+        solidworks, "process_executable", lambda pid: selected if pid == 42 else other
+    )
+    dispatched = []
+
+    def dispatch(value):
+        dispatched.append(value)
+        return value
+
+    case.client.Dispatch = dispatch
+    result = solidworks.inspect_project("C:/SOLIDWORKS")
+    assert result["pid"] == 42 and len(dispatched) == 1
+    assert case.events == ["initialize", "uninitialize"]
+    with pytest.raises(ValueError, match="different installation"):
+        solidworks.inspect_project("C:/SOLIDWORKS", pid=999)
+    assert len(dispatched) == 1
+
+
+def test_solidworks_inspection_requires_pid_when_matching_sessions_are_ambiguous(
+    solidworks_multiple_sessions,
+):
+    case = solidworks_multiple_sessions
+    with pytest.raises(ValueError, match=r"Multiple.*--pid.*42, 999"):
+        solidworks.inspect_project("C:/SOLIDWORKS")
+    assert case.events == ["initialize", "uninitialize"]
+    assert solidworks.inspect_project("C:/SOLIDWORKS", pid=42)["pid"] == 42
+    result = solidworks.inspect_project("C:/SOLIDWORKS", pid=999)
+    assert result["pid"] == 999 and result["revision"] == "second session"
+    assert result["documents"] == [] and result["active_document"] is None
+    assert case.events == ["initialize", "uninitialize"] * 3
+
+
+def test_solidworks_inspection_does_not_fall_back_from_a_missing_pid(solidworks_session):
+    case = solidworks_session
+    with pytest.raises(RuntimeError, match="No matching"):
+        solidworks.inspect_project("C:/SOLIDWORKS", pid=123)
+    assert case.events == ["initialize", "uninitialize"]
+
+
+@pytest.mark.parametrize("pid", [None, 42])
+def test_solidworks_inspection_rejects_unverifiable_processes(
+    solidworks_session, monkeypatch, pid,
+):
+    case = solidworks_session
+
+    def denied(_):
+        raise PermissionError("Cannot query process")
+
+    monkeypatch.setattr(solidworks, "process_executable", denied)
+    with pytest.raises(RuntimeError, match="No matching|Cannot verify"):
+        solidworks.inspect_project("C:/SOLIDWORKS", pid=pid)
+    assert case.events == ["initialize", "uninitialize"]
+
+
+def test_solidworks_inspection_rejects_a_mismatched_moniker_pid(solidworks_session):
+    case = solidworks_session
+    case.application.GetProcessID = lambda: 999
+    with pytest.raises(RuntimeError, match="different application process"):
+        solidworks.inspect_project("C:/SOLIDWORKS", pid=42)
+    assert case.events == ["initialize", "uninitialize"]
+
+
+def test_solidworks_inspection_skips_unreadable_entries_and_reports_busy_session(
+    solidworks_session,
+):
+    case = solidworks_session
+
+    def unreadable(*_):
+        raise case.pythoncom.com_error("No display name")
+
+    case.table.insert(0, SimpleNamespace(GetDisplayName=unreadable))
+    assert solidworks.inspect_project("C:/SOLIDWORKS")["pid"] == 42
+    case.client.Dispatch = unreadable
+    with pytest.raises(RuntimeError, match="PID 42.*busy"):
+        solidworks.inspect_project("C:/SOLIDWORKS", pid=42)
+    assert case.events == ["initialize", "uninitialize"] * 2
+
+
+@pytest.mark.parametrize("pid", [0, -1, True, "42", 2**32])
+def test_solidworks_inspection_validates_pid_before_native_access(pid):
+    with pytest.raises(ValueError, match="positive Windows process ID"):
+        solidworks.inspect_project("C:/SOLIDWORKS", pid=pid)
 
 
 @pytest.mark.parametrize("kwargs", [{"paths": ["result"]}, {"allow_open": True}])
@@ -636,7 +796,8 @@ def test_solidworks_inspection_rejects_opening_and_solver_results(kwargs):
         solidworks.inspect_project("C:/SOLIDWORKS", **kwargs)
 
 
-def test_windows_inspection_cli_forwards_optional_native_arguments(monkeypatch, capsys):
+@pytest.mark.parametrize("pid", [None, 42])
+def test_windows_inspection_cli_forwards_optional_native_arguments(monkeypatch, capsys, pid):
     calls = []
     monkeypatch.setattr(windows.WindowsBridge, "__init__", lambda *args: None)
     monkeypatch.setattr(
@@ -644,12 +805,15 @@ def test_windows_inspection_cli_forwards_optional_native_arguments(monkeypatch, 
         lambda self, project, results, **kwargs:
         calls.append((project, results, kwargs)) or {"documents": []},
     )
-    args = build_parser().parse_args([
+    argv = [
         "windows", "inspect", "--application", "solidworks",
         "--installation", "C:/SOLIDWORKS", "--python", "C:/Python/python.exe",
-    ])
+    ]
+    if pid is not None:
+        argv.extend(("--pid", str(pid)))
+    args = build_parser().parse_args(argv)
     assert windows.main(args) == 0
-    assert calls == [(None, [], {"allow_open": False})]
+    assert calls == [(None, [], {"allow_open": False, "pid": pid})]
     assert json.loads(capsys.readouterr().out) == {"documents": []}
 
 
@@ -666,6 +830,43 @@ def test_windows_inspection_passes_cst_paths_and_flags_to_native_runner(monkeypa
         "inspect", "--project", "C:\\work\\project.cst", "--result",
         "1D Results\\test", "--allow-open",
     )]
+    with pytest.raises(ValueError, match="only for SOLIDWORKS"):
+        bridge.inspect("project.cst", pid=42)
+
+
+def test_windows_inspection_forwards_selected_solidworks_pid():
+    bridge = object.__new__(windows.WindowsBridge)
+    bridge.application = "solidworks"
+    calls = []
+    bridge.call = lambda *args: calls.append(args) or {}
+    bridge.inspect(pid=42)
+    assert calls == [("inspect", "--pid", "42")]
+
+
+@pytest.mark.parametrize(
+    "application,pid", [("solidworks", None), ("solidworks", 42), ("cst", None)]
+)
+def test_native_inspection_parser_forwards_pid_only_when_requested(
+    monkeypatch, capsys, application, pid,
+):
+    calls = []
+    module = SimpleNamespace(
+        inspect_project=lambda *args, **kwargs: calls.append((args, kwargs)) or {}
+    )
+    monkeypatch.setattr(runtime, "adapter", lambda _: module)
+    argv = ["runner", "inspect", "--application", application, "--installation", "C:/Application"]
+    if pid is not None:
+        argv.extend(("--pid", str(pid)))
+    monkeypatch.setattr(sys, "argv", argv)
+    runtime.main()
+    assert calls == [(("C:/Application", None, [], False), {"pid": pid} if pid else {})]
+    assert json.loads(capsys.readouterr().out)["application"] == application
+
+
+def test_native_inspection_parser_rejects_cst_pid(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["runner", "inspect", "--application", "cst", "--pid", "42"])
+    with pytest.raises(ValueError, match="only for SOLIDWORKS"):
+        runtime.main()
 
 
 def test_solidworks_adapter_claims_session_then_edits_rebuilds_and_exports(solidworks_case):

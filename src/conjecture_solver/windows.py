@@ -78,7 +78,11 @@ class WindowsBridge:
     def check(self):
         return self.call("check")
 
-    def inspect(self, project=None, results=(), *, allow_open=False):
+    def inspect(self, project=None, results=(), *, allow_open=False, pid=None):
+        if pid is not None and self.application != "solidworks":
+            raise ValueError("--pid is supported only for SOLIDWORKS inspection")
+        if pid is not None and (type(pid) is not int or pid <= 0 or pid > 0xFFFFFFFF):
+            raise ValueError("Choose a positive Windows process ID with --pid")
         if self.application == "cst" and project is None:
             raise ValueError("CST inspection requires --project")
         args = []
@@ -88,6 +92,8 @@ class WindowsBridge:
             args.extend(("--result", result))
         if allow_open:
             args.append("--allow-open")
+        if pid is not None:
+            args.extend(("--pid", str(pid)))
         return self.call("inspect", *args)
 
     @staticmethod
@@ -290,6 +296,7 @@ def configure_parser(parser):
             action.add_argument("--project")
             action.add_argument("--result", action="append", default=[])
             action.add_argument("--allow-open", action="store_true")
+            action.add_argument("--pid", type=int, help="Select a SOLIDWORKS session process ID")
         if name == "submit":
             action.add_argument("--project", required=True)
             action.add_argument("--job-root", required=True)
@@ -317,7 +324,9 @@ def main(args):
         if action == "check":
             result = bridge.check()
         elif action == "inspect":
-            result = bridge.inspect(args.project, args.result, allow_open=args.allow_open)
+            result = bridge.inspect(
+                args.project, args.result, allow_open=args.allow_open, pid=args.pid
+            )
         else:
             arguments = json.loads(args.arguments)
             result = bridge.submit_application(

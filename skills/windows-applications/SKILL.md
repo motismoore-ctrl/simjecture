@@ -27,6 +27,10 @@ to read the running desktop session's PID, version, active document and open
 document metadata. It reports unsaved changes without saving, editing or closing
 the session. An optional `--project PATH` filters already-open documents; it does
 not open the file. Use the same Windows account and elevation as SOLIDWORKS.
+Inspection verifies the session executable against `--installation`. If several
+sessions match, select one of the reported process IDs with `--pid NUMBER`.
+An explicit PID must still belong to the selected installation; inspection never
+falls back to another session when the selected one is unavailable.
 
 ## Submit native work
 

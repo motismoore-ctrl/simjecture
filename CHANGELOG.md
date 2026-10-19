@@ -8,7 +8,10 @@ This project follows semantic versioning. Dates use ISO 8601.
   commission part rebuild/export on SOLIDWORKS 2025. Launch batch jobs in their
   own process and bind its PID-specific automation interface. Correct pywin32
   registration lookup, method dispatch, export argument types and IGES suffixes;
-  retain the actual output filename casing in export receipts.
+  retain the actual output filename casing in export receipts. Skip unreadable
+  COM entries, retry temporary startup binding failures, and verify inspected
+  processes against the selected installation with explicit PID selection when
+  several sessions match.
 
 - Let a worker acknowledge the replan supplied at the start of its turn. A new
   directive can still interrupt an older turn; an already-delivered directive no
