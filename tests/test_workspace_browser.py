@@ -377,6 +377,70 @@ def test_legacy_solver_command_can_move_to_simulations_without_moving_files(tmp_
         server.server_close()
 
 
+def test_chat_artifacts_resolve_beyond_the_bounded_file_index(tmp_path):
+    playwright = pytest.importorskip("playwright.sync_api")
+    app = SimjectureWebApplication(runs_root=tmp_path, scan_roots=(tmp_path,))
+    project = app.workspace.create({"name": "Large solver archive"})
+    files = app.workspace.directory(project["id"]) / "files"
+    for index in range(201):
+        (files / f"{index:04d}.txt").write_text("archived input")
+    results = files / "zz-results"
+    results.mkdir()
+    report = results / "report.md"
+    report.write_text("# Reviewed solver results\n")
+    (results / "field.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10">'
+        '<rect width="20" height="10" fill="blue"/></svg>'
+    )
+    snapshot = app.workspace.project(project["id"])
+    assert len(snapshot["files"]) == 200
+    assert not any(f["name"].startswith("zz-results/") for f in snapshot["files"])
+    server = create_server(app, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with playwright.sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{server.server_port}/#project={project['id']}")
+            page.locator("#chat-input").wait_for()
+            blocked = page.evaluate(
+                """([text, project]) => {
+                  const target = document.createElement('div'); target.id='late-artifacts';
+                  document.querySelector('#messages').append(target);
+                  WorkspaceRich.render(target, text, project);
+                  return ['../outside.txt', '/etc/passwd', '#project=other',
+                    'https://example.org/paper', 'mailto:example@example.org'].map(
+                      path => WorkspaceRich.artifactURL(path, project));
+                }""",
+                [
+                    f"[Late report]({report})\n\n"
+                    "![Late field](zz-results/field.svg)\n\n"
+                    "[External paper](https://example.org/paper)",
+                    snapshot,
+                ],
+            )
+            assert blocked == [None] * 5
+            link = page.get_by_role("link", name="Late report", exact=True)
+            assert "/api/workspace/file?" in link.get_attribute("href")
+            response = page.request.get(link.evaluate("el => el.href"))
+            assert response.status == 200
+            assert response.text() == "# Reviewed solver results\n"
+            assert page.get_by_role("link", name="External paper").get_attribute("href") == (
+                "https://example.org/paper"
+            )
+            page.locator("#late-artifacts img").scroll_into_view_if_needed()
+            page.wait_for_function(
+                "document.querySelector('#late-artifacts img')?.naturalWidth === 20"
+            )
+            with page.expect_download() as download:
+                link.click()
+            assert download.value.suggested_filename == "report.md"
+            browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_selected_simulation_files_do_not_mix_run_outputs_and_project_results(tmp_path):
     playwright = pytest.importorskip("playwright.sync_api")
     from tests.test_workspace_simulations import await_finished

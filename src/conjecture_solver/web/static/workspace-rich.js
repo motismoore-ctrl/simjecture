@@ -50,7 +50,10 @@ window.WorkspaceRich = (() => {
       )
         path = path.slice(project.files_directory.length + 1);
       path = path.replace(/^\.\//, "").replace(/^files\//, "");
-      if (!project.files?.some((f) => f.name === path)) return null;
+      // The file index is capped; explicit local links can refer to later results.
+      // The file endpoint checks containment and existence independently.
+      if (!path || path.startsWith("#") || /^[a-z][a-z0-9+.-]*:/i.test(path))
+        return null;
     }
     if (path.startsWith("/") || path.split("/").includes("..")) return null;
     const params = new URLSearchParams({ id: project.id, path });

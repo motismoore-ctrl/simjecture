@@ -152,6 +152,8 @@ project files. Pass `input_files=[]` when the command needs no copied inputs,
 for example when using explicit paths to an installed runtime. Omitting the
 field copies all eligible project files, subject to the 512 MB input limit.
 Run outputs still belong in the returned simulation workspace.
+Conversation links and figures can open saved files beyond the file pane's
+200-entry index.
 
 If an earlier solver run was launched as a command, open its monitor and choose
 **Move to Simulations**. **Move to Commands** reverses that classification. This
