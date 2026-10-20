@@ -26,7 +26,6 @@ from ..mvp_launch import ProcessIdentity, process_identity_matches, read_process
 from ..research_service import put
 
 TERMINAL = {"succeeded", "failed", "cancelled", "timed_out", "interrupted"}
-MAX_INPUT_BYTES = 512 * 1024**2
 
 
 def selected_inputs(project, selection):
@@ -37,7 +36,7 @@ def selected_inputs(project, selection):
     ):
         raise ValueError("input_files must be a list of project-relative file paths")
     paths = sorted(files.rglob("*")) if selection is None else [files / p for p in selection]
-    selected, seen, total = [], set(), 0
+    selected, seen = [], set()
     for path in paths:
         relative = path.relative_to(files)
         invalid = (
@@ -58,9 +57,6 @@ def selected_inputs(project, selection):
         name = relative.as_posix()
         if name in seen:
             continue
-        total += path.stat().st_size
-        if total > MAX_INPUT_BYTES:
-            raise ValueError("Simulation inputs exceed 512 MB; select only needed input_files")
         seen.add(name)
         selected.append((path, relative))
     return selected
@@ -229,7 +225,7 @@ def workspace_files(work, request):
             continue
 
 
-def snapshot(project, identifier, *, include_files=False):
+def snapshot(project, identifier, *, include_files=False, summary=False):
     root = resolve(Path(project), identifier)
     request, state = read(root / "request.json"), read(root / "state.json")
     live = is_live(read(root / "process.json"))
@@ -245,14 +241,33 @@ def snapshot(project, identifier, *, include_files=False):
             live=live,
             path=str(root),
             elapsed_seconds=max(0, state.get("finished_at", time.time()) - request["created_at"]),
-            output=tail(root / "output.log"),
-            controller_output=tail(root / "controller.log", 2000),
-            console_logs=[
-                dict(name=f"__console__/{p.name}", bytes=p.stat().st_size, role="console")
-                for p in sorted(root.glob("output.*"))
-                if p.is_file() and not p.is_symlink()
-            ],
         )
+    )
+    if summary:
+        # Poll complete history without reading consoles or returning input lists.
+        return {
+            key: result[key]
+            for key in (
+                "id",
+                "name",
+                "kind",
+                "status",
+                "live",
+                "created_at",
+                "source_turn",
+                "scientific_status",
+                "elapsed_seconds",
+            )
+            if key in result
+        }
+    result.update(
+        output=tail(root / "output.log"),
+        controller_output=tail(root / "controller.log", 2000),
+        console_logs=[
+            dict(name=f"__console__/{p.name}", bytes=p.stat().st_size, role="console")
+            for p in sorted(root.glob("output.*"))
+            if p.is_file() and not p.is_symlink()
+        ],
     )
     if include_files:
         work = Path(request["work_directory"])
@@ -273,25 +288,21 @@ def snapshot(project, identifier, *, include_files=False):
     return result
 
 
-def recent_jobs(records, limit=100):
-    """Keep simulation history visible even after many later shell commands."""
+def ordered_jobs(records):
+    """Return complete history in chronological order, including native commands."""
 
     def started(job):
         turn = str(job.get("source_turn", ""))
         return job.get("created_at") or (int(turn) / 1e9 if turn.isdigit() else 0)
 
-    counts, result = {}, []
-    for job in reversed(sorted(records, key=started)):
-        kind = job.get("kind", "simulation")
-        if counts.get(kind, 0) < limit:
-            result.append(job)
-            counts[kind] = counts.get(kind, 0) + 1
-    return list(reversed(result))
+    return sorted(records, key=started)
 
 
-def list_jobs(project):
+def list_jobs(project, *, summary=False):
     directory = Path(project) / "simulations"
-    return recent_jobs(snapshot(project, p.parent.name) for p in directory.glob("*/request.json"))
+    return ordered_jobs(
+        snapshot(project, p.parent.name, summary=summary) for p in directory.glob("*/request.json")
+    )
 
 
 def classify(project, identifier, kind):

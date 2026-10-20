@@ -913,7 +913,7 @@ class Workspace(MachineWorkspace, ProjectCollections):
 
     def project(self, identifier):
         from .activity import native_activity
-        from .jobs import list_jobs, recent_jobs
+        from .jobs import list_jobs, ordered_jobs
 
         directory = self.directory(identifier)
         project = load(directory / "project.json")
@@ -928,7 +928,7 @@ class Workspace(MachineWorkspace, ProjectCollections):
                 None,
             )
         messages = []
-        simulations = list_jobs(directory)
+        simulations = list_jobs(directory, summary=True)
         running = False
         for turn in sorted((directory / "turns").iterdir()):
             request = load(turn / "request.json")
@@ -1059,7 +1059,7 @@ class Workspace(MachineWorkspace, ProjectCollections):
             "running": running,
             "files": files,
             "files_directory": str(directory / "files"),
-            "simulations": recent_jobs(simulations),
+            "simulations": ordered_jobs(simulations),
         }
 
     def write_index(self, directory):

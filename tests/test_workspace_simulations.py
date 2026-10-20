@@ -125,15 +125,18 @@ def test_command_files_are_shared_project_files(tmp_path):
     }
 
 
-def test_selected_simulation_inputs_skip_large_unrelated_project_files(tmp_path, monkeypatch):
+def test_selected_simulation_inputs_skip_large_unrelated_project_files(tmp_path):
     files = tmp_path / "files"
     (files / "case").mkdir(parents=True)
     (files / "case/input.txt").write_text("needed")
-    (files / "old-result.bin").write_bytes(b"x" * 100)
-    monkeypatch.setattr(jobs, "MAX_INPUT_BYTES", 20)
-    with pytest.raises(ValueError, match="select only needed input_files"):
-        jobs.launch(tmp_path, dict(command="true"))
-    assert not list((tmp_path / "simulations").glob("*/request.json"))
+    # A sparse archive exceeds the former 512 MiB ceiling without a large test write.
+    with (files / "old-result.bin").open("wb") as stream:
+        stream.truncate(1024**3)
+    assert {relative.as_posix() for _, relative in jobs.selected_inputs(tmp_path, None)} == {
+        "case/input.txt",
+        "old-result.bin",
+    }
+    assert len(jobs.selected_inputs(tmp_path, ["old-result.bin"])) == 1
     run = jobs.launch(
         tmp_path,
         dict(
@@ -204,7 +207,7 @@ def test_simulation_history_survives_many_newer_commands(tmp_path):
     project = workspace.create({"name": "Simulation history"})
     root_project = workspace.directory(project["id"])
     directory = root_project / "simulations"
-    for i in range(110):
+    for i in range(240):
         root = directory / f"{i:03d}-job"
         root.mkdir(parents=True)
         jobs.put(
@@ -212,20 +215,48 @@ def test_simulation_history_survives_many_newer_commands(tmp_path):
             dict(
                 id=root.name,
                 name=root.name,
-                kind="simulation" if i == 0 else "command",
+                kind="simulation" if i < 120 else "command",
                 created_at=i,
             ),
         )
         jobs.put(root / "state.json", dict(status="succeeded", finished_at=i))
     records = jobs.list_jobs(root_project)
-    assert len(records) == 101
+    assert len(records) == 240
     assert records[0]["id"] == "000-job"
-    assert records[1]["id"] == "010-job"
-    assert len(workspace.project(project["id"])["simulations"]) == 101
+    assert records[1]["id"] == "001-job"
+    assert len(workspace.project(project["id"])["simulations"]) == 240
     native = dict(id="native-active", kind="command", source_turn="1000000000000", live=True)
-    combined = jobs.recent_jobs(records + [native])
-    assert len(combined) == 101 and combined[-1] == native
+    combined = jobs.ordered_jobs(records + [native])
+    assert len(combined) == 241 and combined[-1] == native
     assert combined[0]["kind"] == "simulation"
+
+
+def test_history_summaries_do_not_read_console_logs(tmp_path, monkeypatch):
+    run = tmp_path / "simulations/001-solver"
+    run.mkdir(parents=True)
+    jobs.put(
+        run / "request.json",
+        dict(
+            id=run.name,
+            name="Solver",
+            kind="simulation",
+            created_at=1,
+            inputs=["input.par"],
+            input_manifest={"input.par": {}},
+        ),
+    )
+    jobs.put(run / "state.json", dict(status="succeeded", finished_at=2))
+    (run / "output.log").write_text("Retained detailed output")
+    calls = []
+    original = jobs.tail
+    monkeypatch.setattr(
+        jobs, "tail", lambda path, *args: calls.append(path) or original(path, *args)
+    )
+    summaries = jobs.list_jobs(tmp_path, summary=True)
+    assert summaries[0]["id"] == "001-solver"
+    assert "output" not in summaries[0] and "inputs" not in summaries[0]
+    assert calls == []
+    assert jobs.snapshot(tmp_path, "001-solver")["output"] == "Retained detailed output"
 
 
 def test_native_activity_exposes_state_not_reasoning(tmp_path):

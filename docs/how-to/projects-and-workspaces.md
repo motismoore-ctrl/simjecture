@@ -143,14 +143,19 @@ control token, and read-only servers reject them.
 
 Calculations launched with `run_simulation` appear in **Simulations**; setup,
 inspection and build jobs launched with `run_command` appear in **Commands**.
-Both retain their execution status and logs. Each list keeps its latest 100
-entries, so later inspection commands do not hide earlier simulations.
+Both retain their execution status and logs. The full history stays accessible,
+with no maximum number of simulations or commands. Lists initially show the
+latest 50 entries; **Show more** reveals earlier entries. A direct link to an older
+run opens it immediately. Polling uses compact records and loads detailed logs
+for selected runs.
 
 For a large conversation, pass `input_files=["case/flash.par", "case/drive.dat"]`
 to `run_simulation` or the `start_simulation` bridge to copy only the required
 project files. Pass `input_files=[]` when the command needs no copied inputs,
 for example when using explicit paths to an installed runtime. Omitting the
-field copies all eligible project files, subject to the 512 MB input limit.
+field copies all eligible project files. Local interactive input snapshots have
+no fixed size limit; copying depends on available storage. Select only the inputs
+you need to avoid repeatedly copying unrelated archives.
 Run outputs still belong in the returned simulation workspace.
 Conversation links and figures can open saved files beyond the file pane's
 200-entry index.

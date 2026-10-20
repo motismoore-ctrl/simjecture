@@ -888,17 +888,16 @@ def test_long_build_command_is_monitored_after_tool_returns(tmp_path):
     assert failed["returncode"] != 0
 
 
-def test_simulation_tool_can_select_inputs_in_large_projects(tmp_path, monkeypatch):
+def test_simulation_tool_can_select_inputs_in_large_projects(tmp_path):
     pytest.importorskip("smolagents")
-    from conjecture_solver.web import jobs
     from conjecture_solver.workspace_agent import agent_tools
 
     workspace = Workspace(tmp_path / ".workspace")
     project = workspace.create({"name": "Selected solver inputs"})
     root = Path(project["files_directory"])
     (root / "input.txt").write_text("needed")
-    (root / "old-output.bin").write_bytes(b"x" * 100)
-    monkeypatch.setattr(jobs, "MAX_INPUT_BYTES", 20)
+    with (root / "old-output.bin").open("wb") as stream:
+        stream.truncate(1024**3)
     tool = next(
         t
         for t in agent_tools(root, float("inf"), project["id"], workspace)

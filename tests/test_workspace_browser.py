@@ -441,6 +441,76 @@ def test_chat_artifacts_resolve_beyond_the_bounded_file_index(tmp_path):
         server.server_close()
 
 
+def test_all_run_history_is_reachable_through_pages_and_old_links(tmp_path):
+    playwright = pytest.importorskip("playwright.sync_api")
+    from conjecture_solver.web import jobs
+
+    app = SimjectureWebApplication(runs_root=tmp_path, scan_roots=(tmp_path,))
+    project = app.workspace.create({"name": "Long research history"})
+    directory = app.workspace.directory(project["id"])
+    for index in range(240):
+        root = directory / "simulations" / f"{index:03d}-job"
+        root.mkdir(parents=True)
+        jobs.put(
+            root / "request.json",
+            dict(
+                id=root.name,
+                name=f"History {index}",
+                kind="simulation" if index < 120 else "command",
+                created_at=index,
+                command="echo retained",
+                work_directory=str(directory / "files"),
+            ),
+        )
+        jobs.put(root / "state.json", dict(status="succeeded", finished_at=index + 1))
+        (root / "output.log").write_text(f"Saved output {index}")
+    server = create_server(app, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    errors = []
+    try:
+        with playwright.sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.goto(
+                f"http://127.0.0.1:{server.server_port}/workspace"
+                f"#project={project['id']}&simulation=119-job"
+            )
+            playwright.expect(page.locator("#simulation-count")).to_have_text("120")
+            playwright.expect(page.locator("#command-count")).to_have_text("120")
+            playwright.expect(page.locator("#simulation-list .simulation-item")).to_have_count(50)
+            page.locator("#simulation-list .load-more-runs").click()
+            playwright.expect(page.locator("#simulation-list .simulation-item")).to_have_count(100)
+            page.locator("#simulation-list .load-more-runs").click()
+            playwright.expect(page.locator("#simulation-list .simulation-item")).to_have_count(120)
+            page.locator('#simulation-list a[href*="simulation=000-job"]').click()
+            playwright.expect(page.locator("#simulation-detail .live-console")).to_have_text(
+                "Saved output 0"
+            )
+            page.reload()
+            playwright.expect(page.locator("#simulation-detail h3")).to_have_text("History 0")
+            playwright.expect(page.locator("#simulation-detail .live-console")).to_have_text(
+                "Saved output 0"
+            )
+            # An old direct link stays visible alongside the newest page.
+            playwright.expect(
+                page.locator('#simulation-list a[href*="simulation=000-job"]')
+            ).to_be_visible()
+            page.locator('wa-tab[panel="commands"]').click()
+            page.locator("#command-list .load-more-runs").click()
+            page.locator("#command-list .load-more-runs").click()
+            playwright.expect(page.locator("#command-list .simulation-item")).to_have_count(120)
+            page.locator('#command-list a[href*="command=120-job"]').click()
+            playwright.expect(page.locator("#command-detail .live-console")).to_have_text(
+                "Saved output 120"
+            )
+            assert not errors
+            browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_selected_simulation_files_do_not_mix_run_outputs_and_project_results(tmp_path):
     playwright = pytest.importorskip("playwright.sync_api")
     from tests.test_workspace_simulations import await_finished

@@ -13,6 +13,7 @@ window.WorkspaceMonitor = {
       announced = new Set(),
       inFlight = {},
       detailRevision = {},
+      visibleCounts = { simulations: 50, commands: 50 },
       listRevision = "";
     const panelFor = (job) =>
       job.kind === "command" ? "commands" : "simulations";
@@ -38,6 +39,7 @@ window.WorkspaceMonitor = {
         selected = { simulations: null, commands: null };
         announced = new Set(jobs.map((j) => j.id));
         detailRevision = {};
+        visibleCounts = { simulations: 50, commands: 50 };
         for (const panel of ["simulations", "commands"]) {
           const container = $(`${prefixFor(panel)}-detail`);
           container.replaceChildren(
@@ -76,6 +78,7 @@ window.WorkspaceMonitor = {
       const nextList = JSON.stringify([
         p.id,
         selected,
+        visibleCounts,
         jobs.map((j) => [j.id, j.name, j.status, j.kind]),
       ]);
       if (nextList !== listRevision) {
@@ -86,8 +89,11 @@ window.WorkspaceMonitor = {
         $("sidebar-run-list").replaceChildren();
         $("simulation-list").replaceChildren();
         $("command-list").replaceChildren();
+        const shown = { simulations: 0, commands: 0 };
         for (const job of [...jobs].reverse()) {
           const panel = panelFor(job);
+          const inPage = shown[panel]++ < visibleCounts[panel];
+          if (!inPage && job.id !== selected[panel]) continue;
           const a = node(
             "a",
             undefined,
@@ -111,6 +117,21 @@ window.WorkspaceMonitor = {
             b.onclick = () => window.WorkspacePanels?.set("right", false);
             $("sidebar-run-list").append(b);
           }
+        }
+        for (const panel of ["simulations", "commands"]) {
+          const remaining = shown[panel] - visibleCounts[panel];
+          if (remaining <= 0) continue;
+          const more = node(
+            "button",
+            `Show ${Math.min(50, remaining)} more ${panel}`,
+            "quiet load-more-runs",
+          );
+          more.type = "button";
+          more.onclick = () => {
+            visibleCounts[panel] += 50;
+            render(project());
+          };
+          $(`${prefixFor(panel)}-list`).append(more);
         }
         inspector.scrollTop = inspectorScroll;
         $("sidebar-run-list").scrollTop = sidebarScroll;
