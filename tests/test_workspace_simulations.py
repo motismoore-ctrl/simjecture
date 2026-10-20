@@ -167,20 +167,30 @@ def test_selected_inputs_reject_non_project_or_linked_files(tmp_path, selection)
     assert not (tmp_path / "simulations").exists()
 
 
-def test_reclassifying_legacy_command_preserves_request_and_shared_provenance(tmp_path):
+@pytest.mark.parametrize("aliased", [False, True])
+def test_reclassifying_legacy_command_preserves_request_and_shared_provenance(tmp_path, aliased):
     (tmp_path / "files").mkdir()
     run = jobs.launch(
         tmp_path, dict(name="Solver", command="echo result > field.txt", kind="command")
     )
     await_finished(tmp_path, run["id"])
     request = tmp_path / "simulations" / run["id"] / "request.json"
+    work = tmp_path / "files"
+    if aliased:
+        # Migrated requests can retain an old host path through a compatibility link.
+        alias = tmp_path / "old-host"
+        alias.symlink_to(tmp_path, target_is_directory=True)
+        work = alias / "files"
+        saved = json.loads(request.read_text())
+        saved["work_directory"] = str(work)
+        request.write_text(json.dumps(saved))
     original = request.read_bytes()
     jobs.classify(tmp_path, run["id"], "simulation")
     result = jobs.snapshot(tmp_path, run["id"], include_files=True)
     assert result["kind"] == "simulation"
     assert result["file_provenance"] == "shared"
     assert result["files"] == [dict(name="field.txt", bytes=7, role="shared")]
-    assert result["work_directory"] == str(tmp_path / "files")
+    assert result["work_directory"] == str(work)
     assert request.read_bytes() == original
     assert jobs.classify(tmp_path, run["id"], "command")["kind"] == "command"
     with pytest.raises(ValueError, match="Choose simulation or command"):

@@ -213,12 +213,13 @@ def file_role(path, name, request):
 
 
 def workspace_files(work, request):
+    resolved_work = work.resolve()
     for path in work.rglob("*"):
         relative = path.relative_to(work)
         if path.is_symlink() or any(p.startswith(".") for p in relative.parts):
             continue
         try:
-            if path.is_file() and path.resolve().is_relative_to(work):
+            if path.is_file() and path.resolve().is_relative_to(resolved_work):
                 name = relative.as_posix()
                 yield dict(
                     name=name, bytes=path.stat().st_size, role=file_role(path, name, request)
