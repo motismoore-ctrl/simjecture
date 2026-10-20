@@ -3,6 +3,8 @@
 import json
 import time
 
+import pytest
+
 from conjecture_solver.web import jobs
 from conjecture_solver.web.activity import native_activity
 from conjecture_solver.web.inventory import discover_system_warpx
@@ -121,6 +123,99 @@ def test_command_files_are_shared_project_files(tmp_path):
         "previous-result.txt": "shared",
         "comparison.txt": "shared",
     }
+
+
+def test_selected_simulation_inputs_skip_large_unrelated_project_files(tmp_path, monkeypatch):
+    files = tmp_path / "files"
+    (files / "case").mkdir(parents=True)
+    (files / "case/input.txt").write_text("needed")
+    (files / "old-result.bin").write_bytes(b"x" * 100)
+    monkeypatch.setattr(jobs, "MAX_INPUT_BYTES", 20)
+    with pytest.raises(ValueError, match="select only needed input_files"):
+        jobs.launch(tmp_path, dict(command="true"))
+    assert not list((tmp_path / "simulations").glob("*/request.json"))
+    run = jobs.launch(
+        tmp_path,
+        dict(
+            command="cat case/input.txt > result.txt",
+            input_files=["case/input.txt", "case/input.txt"],
+        ),
+    )
+    result = await_finished(tmp_path, run["id"])
+    assert result["kind"] == "simulation" and result["status"] == "succeeded"
+    assert result["inputs"] == ["case/input.txt"]
+    assert {f["name"]: f["role"] for f in result["files"]} == {
+        "case/input.txt": "input",
+        "result.txt": "output",
+    }
+    empty = jobs.launch(tmp_path, dict(command="printf fresh > fresh.txt", input_files=[]))
+    assert {f["name"] for f in await_finished(tmp_path, empty["id"])["files"]} == {"fresh.txt"}
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [["../outside.txt"], ["/etc/passwd"], ["linked/file.txt"], ["missing.txt"], "input.txt", [123]],
+)
+def test_selected_inputs_reject_non_project_or_linked_files(tmp_path, selection):
+    (tmp_path / "files").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file.txt").write_text("not a project input")
+    (tmp_path / "files/linked").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError):
+        jobs.launch(tmp_path, dict(command="true", input_files=selection))
+    assert not (tmp_path / "simulations").exists()
+
+
+def test_reclassifying_legacy_command_preserves_request_and_shared_provenance(tmp_path):
+    (tmp_path / "files").mkdir()
+    run = jobs.launch(
+        tmp_path, dict(name="Solver", command="echo result > field.txt", kind="command")
+    )
+    await_finished(tmp_path, run["id"])
+    request = tmp_path / "simulations" / run["id"] / "request.json"
+    original = request.read_bytes()
+    jobs.classify(tmp_path, run["id"], "simulation")
+    result = jobs.snapshot(tmp_path, run["id"], include_files=True)
+    assert result["kind"] == "simulation"
+    assert result["file_provenance"] == "shared"
+    assert result["files"] == [dict(name="field.txt", bytes=7, role="shared")]
+    assert result["work_directory"] == str(tmp_path / "files")
+    assert request.read_bytes() == original
+    assert jobs.classify(tmp_path, run["id"], "command")["kind"] == "command"
+    with pytest.raises(ValueError, match="Choose simulation or command"):
+        jobs.classify(tmp_path, run["id"], "evidence")
+
+
+def test_simulation_history_survives_many_newer_commands(tmp_path):
+    from conjecture_solver.web.workspace import Workspace
+
+    workspace = Workspace(tmp_path / ".workspace")
+    project = workspace.create({"name": "Simulation history"})
+    root_project = workspace.directory(project["id"])
+    directory = root_project / "simulations"
+    for i in range(110):
+        root = directory / f"{i:03d}-job"
+        root.mkdir(parents=True)
+        jobs.put(
+            root / "request.json",
+            dict(
+                id=root.name,
+                name=root.name,
+                kind="simulation" if i == 0 else "command",
+                created_at=i,
+            ),
+        )
+        jobs.put(root / "state.json", dict(status="succeeded", finished_at=i))
+    records = jobs.list_jobs(root_project)
+    assert len(records) == 101
+    assert records[0]["id"] == "000-job"
+    assert records[1]["id"] == "010-job"
+    assert len(workspace.project(project["id"])["simulations"]) == 101
+    native = dict(id="native-active", kind="command", source_turn="1000000000000", live=True)
+    combined = jobs.recent_jobs(records + [native])
+    assert len(combined) == 101 and combined[-1] == native
+    assert combined[0]["kind"] == "simulation"
 
 
 def test_native_activity_exposes_state_not_reasoning(tmp_path):

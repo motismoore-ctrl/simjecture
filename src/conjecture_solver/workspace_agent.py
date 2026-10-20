@@ -566,9 +566,16 @@ def agent_tools(root, deadline, project=None, workspace=None):
             return json.dumps({k: result[k] for k in ("id", "name", "status", "work_directory")})
 
         @tool
-        def run_simulation(name: str, command: str, timeout_seconds: int = 3600) -> str:
+        def run_simulation(
+            name: str,
+            command: str,
+            timeout_seconds: int = 3600,
+            input_files: list[str] | None = None,
+        ) -> str:
             """Launch an interactive simulation in a permanent named run folder.
-            Project input files are copied into its workspace; run the command in foreground.
+            Selected project inputs are copied into its workspace; run the command in foreground.
+            For large projects, provide only needed input_files, or [] for no copied inputs.
+            Use absolute paths for installed runtimes. Do not use run_command for simulations.
             Returns immediately. The browser opens a side monitor with live logs and outputs.
             Save run-specific figures in the returned work_directory; keep cross-run reports
             in the conversation files directory. Copied project inputs are not run outputs.
@@ -578,9 +585,16 @@ def agent_tools(root, deadline, project=None, workspace=None):
                 name: Short human-readable simulation name.
                 command: Shell command to run, using the copied project inputs.
                 timeout_seconds: Maximum run time in seconds.
+                input_files: Optional project-relative files to copy; omit to copy all, [] for none.
             """
             result = workspace.start_simulation(
-                project, dict(name=name, command=command, timeout_seconds=timeout_seconds)
+                project,
+                dict(
+                    name=name,
+                    command=command,
+                    timeout_seconds=timeout_seconds,
+                    input_files=input_files,
+                ),
             )
             emit("simulation", id=result["id"], name=name)
             return json.dumps({k: result[k] for k in ("id", "name", "status", "work_directory")})
@@ -1068,6 +1082,10 @@ def run_external(prompt, root, config, turn, workspace=None, *, wall_seconds=Non
             "long preparation or analysis and use progress_update to explain your current "
             "stage, findings and next action periodically. Launch bounded simulation jobs "
             "so the user can follow them; return control once the requested work is ready. "
+            "Numerical runs must keep kind='simulation'. For large legacy projects use "
+            "input_files=['relative/input.par'] or input_files=[] in start_simulation; "
+            "this retains a named isolated run folder without copying the entire project. "
+            "Use kind='command' only for preparation/build/inspection commands. "
             "Do not let plotting setup block launching a valid pilot. Use runtime interface "
             "metadata: a native-input-file binary does not imply available Python bindings; "
             "do not search for pywarpx when python_bindings is false. For cross-solver work, "

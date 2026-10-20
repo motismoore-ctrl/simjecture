@@ -333,6 +333,50 @@ print("wave")
         server.server_close()
 
 
+def test_legacy_solver_command_can_move_to_simulations_without_moving_files(tmp_path):
+    playwright = pytest.importorskip("playwright.sync_api")
+    from tests.test_workspace_simulations import await_finished
+
+    app = SimjectureWebApplication(runs_root=tmp_path, scan_roots=(tmp_path,))
+    project = app.workspace.create({"name": "Legacy solver"})
+    directory = app.workspace.directory(project["id"])
+    job = app.workspace.start_simulation(
+        project["id"], dict(name="Foil pilot", kind="command", command="echo field > field.txt")
+    )
+    await_finished(directory, job["id"])
+    request = directory / "simulations" / job["id"] / "request.json"
+    original = request.read_bytes()
+    server = create_server(app, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with playwright.sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            page.goto(
+                f"http://127.0.0.1:{server.server_port}/#project={project['id']}&command={job['id']}"
+            )
+            playwright.expect(page.locator("#simulation-count")).to_have_text("0")
+            page.get_by_role("button", name="Move to Simulations", exact=True).click()
+            playwright.expect(page.locator("#simulation-count")).to_have_text("1")
+            playwright.expect(page.locator("#command-count")).to_have_text("0")
+            playwright.expect(page.locator("#simulation-detail h3")).to_have_text("Foil pilot")
+            playwright.expect(page.locator("#simulation-detail .run-shared-files")).to_contain_text(
+                "field.txt"
+            )
+            assert "simulation=" + job["id"] in page.url
+            page.reload()
+            playwright.expect(page.locator("#simulation-count")).to_have_text("1")
+            page.get_by_role("button", name="Move to Commands", exact=True).click()
+            playwright.expect(page.locator("#simulation-count")).to_have_text("0")
+            playwright.expect(page.locator("#command-count")).to_have_text("1")
+            assert request.read_bytes() == original
+            assert (directory / "files/field.txt").read_text() == "field\n"
+            browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_selected_simulation_files_do_not_mix_run_outputs_and_project_results(tmp_path):
     playwright = pytest.importorskip("playwright.sync_api")
     from tests.test_workspace_simulations import await_finished
@@ -696,7 +740,7 @@ def test_source_tools_open_agent_assisted_installation_conversations(tmp_path, m
             ]:
                 page.get_by_role("button", name="Research tools", exact=True).click()
                 page.locator(f'[data-tool="{identifier}"]').click()
-                page.locator('#tool-details-dialog').get_by_role(
+                page.locator("#tool-details-dialog").get_by_role(
                     "button", name="Install with agent", exact=True
                 ).click()
                 playwright.expect(page.locator("#project-title")).to_have_text(f"Install {name}")

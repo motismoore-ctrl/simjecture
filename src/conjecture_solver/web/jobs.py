@@ -26,6 +26,44 @@ from ..mvp_launch import ProcessIdentity, process_identity_matches, read_process
 from ..research_service import put
 
 TERMINAL = {"succeeded", "failed", "cancelled", "timed_out", "interrupted"}
+MAX_INPUT_BYTES = 512 * 1024**2
+
+
+def selected_inputs(project, selection):
+    """Select regular project files without following links or copying unrelated results."""
+    files = project / "files"
+    if selection is not None and (
+        not isinstance(selection, list) or not all(isinstance(p, str) for p in selection)
+    ):
+        raise ValueError("input_files must be a list of project-relative file paths")
+    paths = sorted(files.rglob("*")) if selection is None else [files / p for p in selection]
+    selected, seen, total = [], set(), 0
+    for path in paths:
+        relative = path.relative_to(files)
+        invalid = (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or any(part.startswith(".") for part in relative.parts)
+            or any(
+                (files / Path(*relative.parts[:i])).is_symlink()
+                for i in range(1, len(relative.parts) + 1)
+            )
+            or not path.is_file()
+            or not path.resolve().is_relative_to(files.resolve())
+        )
+        if invalid:
+            if selection is not None:
+                raise ValueError("Simulation inputs must be regular, unlinked project files")
+            continue
+        name = relative.as_posix()
+        if name in seen:
+            continue
+        total += path.stat().st_size
+        if total > MAX_INPUT_BYTES:
+            raise ValueError("Simulation inputs exceed 512 MB; select only needed input_files")
+        seen.add(name)
+        selected.append((path, relative))
+    return selected
 
 
 def read(path):
@@ -71,6 +109,9 @@ def launch(project, payload):
     kind = payload.get("kind", "simulation")
     if kind not in {"simulation", "command"}:
         raise ValueError("Unknown execution kind")
+    if kind == "command" and payload.get("input_files") is not None:
+        raise ValueError("input_files applies to simulations, not shared commands")
+    selected = selected_inputs(project, payload.get("input_files")) if kind == "simulation" else []
     directory = project / "simulations"
     directory.mkdir(exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:64] or "simulation"
@@ -88,19 +129,7 @@ def launch(project, payload):
         inputs = []
         input_manifest = {}
         if kind == "simulation":
-            total = 0
-            for path in (project / "files").rglob("*"):
-                relative = path.relative_to(project / "files")
-                if (
-                    path.is_symlink()
-                    or any(part.startswith(".") for part in relative.parts)
-                    or not path.is_file()
-                    or not path.resolve().is_relative_to(project / "files")
-                ):
-                    continue
-                total += path.stat().st_size
-                if total > 512 * 1024**2:
-                    raise ValueError("Simulation inputs exceed 512 MB; use explicit external paths")
+            for path, relative in selected:
                 target = work / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(path, target)
@@ -210,6 +239,7 @@ def snapshot(project, identifier, *, include_files=False):
         {k: v for k, v in request.items() if k != "input_manifest"}
         | state
         | dict(
+            kind=read(root / "classification.json").get("kind", request.get("kind", "simulation")),
             status=status,
             live=live,
             path=str(root),
@@ -242,11 +272,34 @@ def snapshot(project, identifier, *, include_files=False):
     return result
 
 
+def recent_jobs(records, limit=100):
+    """Keep simulation history visible even after many later shell commands."""
+
+    def started(job):
+        turn = str(job.get("source_turn", ""))
+        return job.get("created_at") or (int(turn) / 1e9 if turn.isdigit() else 0)
+
+    counts, result = {}, []
+    for job in reversed(sorted(records, key=started)):
+        kind = job.get("kind", "simulation")
+        if counts.get(kind, 0) < limit:
+            result.append(job)
+            counts[kind] = counts.get(kind, 0) + 1
+    return list(reversed(result))
+
+
 def list_jobs(project):
     directory = Path(project) / "simulations"
-    return [snapshot(project, p.parent.name) for p in sorted(directory.glob("*/request.json"))][
-        -100:
-    ]
+    return recent_jobs(snapshot(project, p.parent.name) for p in directory.glob("*/request.json"))
+
+
+def classify(project, identifier, kind):
+    if kind not in {"simulation", "command"}:
+        raise ValueError("Choose simulation or command")
+    root = resolve(Path(project), identifier)
+    # Keep execution requests, workspace locations, and file provenance immutable.
+    put(root / "classification.json", dict(kind=kind, updated_at=time.time()))
+    return snapshot(project, identifier)
 
 
 def cancel(project, identifier):

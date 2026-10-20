@@ -913,7 +913,7 @@ class Workspace(MachineWorkspace, ProjectCollections):
 
     def project(self, identifier):
         from .activity import native_activity
-        from .jobs import list_jobs
+        from .jobs import list_jobs, recent_jobs
 
         directory = self.directory(identifier)
         project = load(directory / "project.json")
@@ -1059,7 +1059,7 @@ class Workspace(MachineWorkspace, ProjectCollections):
             "running": running,
             "files": files,
             "files_directory": str(directory / "files"),
-            "simulations": simulations[-100:],
+            "simulations": recent_jobs(simulations),
         }
 
     def write_index(self, directory):
@@ -2202,6 +2202,12 @@ class Workspace(MachineWorkspace, ProjectCollections):
         from .jobs import cancel
 
         return cancel(self.directory(identifier), simulation)
+
+    def classify_simulation(self, identifier, simulation, kind):
+        from .jobs import classify
+
+        with self.lock():
+            return classify(self.directory(identifier), simulation, kind)
 
 
 def main():

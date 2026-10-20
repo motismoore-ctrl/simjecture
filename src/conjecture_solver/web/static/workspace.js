@@ -587,7 +587,7 @@ function renderProject(force = false) {
   const revision = JSON.stringify([
     p.messages,
     p.files,
-    (p.simulations || []).map((j) => [j.id, j.status]),
+    (p.simulations || []).map((j) => [j.id, j.status, j.kind]),
   ]);
   if (revision !== state.messageRevision) {
     const messageScroll = $("messages").scrollTop;

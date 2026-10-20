@@ -888,6 +888,40 @@ def test_long_build_command_is_monitored_after_tool_returns(tmp_path):
     assert failed["returncode"] != 0
 
 
+def test_simulation_tool_can_select_inputs_in_large_projects(tmp_path, monkeypatch):
+    pytest.importorskip("smolagents")
+    from conjecture_solver.web import jobs
+    from conjecture_solver.workspace_agent import agent_tools
+
+    workspace = Workspace(tmp_path / ".workspace")
+    project = workspace.create({"name": "Selected solver inputs"})
+    root = Path(project["files_directory"])
+    (root / "input.txt").write_text("needed")
+    (root / "old-output.bin").write_bytes(b"x" * 100)
+    monkeypatch.setattr(jobs, "MAX_INPUT_BYTES", 20)
+    tool = next(
+        t
+        for t in agent_tools(root, float("inf"), project["id"], workspace)
+        if t.name == "run_simulation"
+    )
+    result = json.loads(
+        tool.forward("Solver pilot", "cat input.txt > field.txt", 10, ["input.txt"])
+    )
+    job = wait_for(
+        lambda: (
+            item
+            if (item := workspace.simulation(project["id"], result["id"]))["status"] == "succeeded"
+            else None
+        )
+    )
+    assert job["kind"] == "simulation"
+    assert job["inputs"] == ["input.txt"]
+    assert {f["name"]: f["role"] for f in job["files"]} == {
+        "input.txt": "input",
+        "field.txt": "output",
+    }
+
+
 def test_registered_tool_can_be_checked_from_catalogue(tmp_path, monkeypatch):
     import conjecture_solver.web.workspace as module
 

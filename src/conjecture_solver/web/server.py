@@ -506,6 +506,10 @@ class SimjectureRequestHandler(BaseHTTPRequestHandler):
                 result = workspace.stop_simulation(
                     payload.get("project"), payload.get("simulation")
                 )
+            elif endpoint == "classify-simulation":
+                result = workspace.classify_simulation(
+                    payload.get("project"), payload.get("simulation"), payload.get("kind")
+                )
             elif endpoint == "delete-project":
                 result = workspace.delete_project(payload.get("project"), payload)
             elif endpoint == "projects":
